@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""wordpass: generate memorable passwords from the EFF short wordlist (2.0)."""
+import argparse
+import http.client
+import os
+import secrets
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+WORDLIST_URL = "https://www.eff.org/files/2016/09/08/eff_short_wordlist_2_0.txt"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "wordpass"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "wordpass"
+WORDLIST_PATH = (
+    Path(os.environ["WORDPASS_WORDLIST"])
+    if os.environ.get("WORDPASS_WORDLIST")
+    else DATA_DIR / "eff_short_wordlist_2_0.txt"
+)
+HISTORY_PATH = STATE_DIR / "history.txt"
+DEFAULT_SYMBOL = "#"
+MIN_EXPECTED_WORDS = 1000  # sanity floor; real list has 1,296 entries
+MAX_ATTEMPTS = 100
+DOWNLOAD_TIMEOUT = 15
+
+
+def parse_history_size() -> int:
+    raw = os.environ.get("WORDPASS_HISTORY_SIZE", "40")
+    try:
+        size = int(raw)
+    except ValueError:
+        sys.exit(f"error: WORDPASS_HISTORY_SIZE={raw!r} is not an integer")
+    if size < 0:
+        sys.exit(f"error: WORDPASS_HISTORY_SIZE={size} must be >= 0")
+    return size
+
+
+def parse_words(raw: str) -> list[str]:
+    words = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # canonical EFF format is "<diceroll><whitespace><word>"; tolerate plain
+        # word-per-line too. split() (not split("\t")) so this survives whichever
+        # whitespace the real download turns out to use.
+        words.append(line.split()[-1])
+    return words
+
+
+def _looks_like_a_word(w: str) -> bool:
+    # EFF's short wordlist 2.0 contains at least one hyphenated entry ("yo-yo"),
+    # confirmed by testing against a real copy of the list -- plain isalpha() would
+    # reject it and make the tool fail on its own official wordlist.
+    return w.isascii() and bool(w) and all(c.isalpha() or c == "-" for c in w) and w[0] != "-" and w[-1] != "-"
+
+
+def wordlist_looks_valid(words: list[str]) -> bool:
+    return len(words) >= MIN_EXPECTED_WORDS and all(_looks_like_a_word(w) for w in words)
+
+
+def download_wordlist() -> str:
+    try:
+        with urllib.request.urlopen(WORDLIST_URL, timeout=DOWNLOAD_TIMEOUT) as resp:
+            return resp.read().decode("utf-8-sig")
+    # OSError (not TimeoutError) so this also catches socket.timeout, which is only
+    # an alias of TimeoutError from Python 3.10 -- macOS system python3 is 3.9.6.
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+        sys.exit(
+            f"error: could not download wordlist from {WORDLIST_URL}: {e}\n"
+            f"Fix manually and place a word-per-line file at: {WORDLIST_PATH}"
+        )
+
+
+def ensure_wordlist() -> list[str]:
+    # WORDPASS_WORDLIST is authoritative when set: never downloaded, never
+    # validated against the 1,296-word floor, never overwritten. A small fixture
+    # file used for testing must survive untouched.
+    if os.environ.get("WORDPASS_WORDLIST"):
+        if not WORDLIST_PATH.exists():
+            sys.exit(f"error: WORDPASS_WORDLIST={WORDLIST_PATH} does not exist")
+        words = parse_words(WORDLIST_PATH.read_text(encoding="utf-8-sig"))
+        if not words or not all(_looks_like_a_word(w) for w in words):
+            sys.exit(f"error: wordlist at {WORDLIST_PATH} contains no usable words")
+        return words
+
+    if WORDLIST_PATH.exists():
+        words = parse_words(WORDLIST_PATH.read_text(encoding="utf-8-sig"))
+        if wordlist_looks_valid(words):
+            return words
+        print(f"warning: cached wordlist at {WORDLIST_PATH} looks corrupt, re-downloading", file=sys.stderr)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    raw = download_wordlist()
+    words = parse_words(raw)
+    if not wordlist_looks_valid(words):
+        sys.exit(f"error: downloaded wordlist from {WORDLIST_URL} looks invalid (got {len(words)} entries)")
+
+    fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(raw)
+    os.replace(tmp_path, WORDLIST_PATH)
+    return words
+
+
+def load_history() -> list[str]:
+    if not HISTORY_PATH.exists():
+        return []
+    return HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+
+
+def append_history(password: str) -> None:
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # mkdir(mode=...) is a no-op on a dir that already exists, so enforce it every call too.
+    os.chmod(STATE_DIR, 0o700)
+    fd = os.open(HISTORY_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(password + "\n")
+
+
+def trim_history(max_size: int) -> None:
+    if not HISTORY_PATH.exists():
+        return
+    lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()
+    if len(lines) <= max_size:
+        return
+    trimmed = lines[-max_size:] if max_size > 0 else []
+    fd, tmp_path = tempfile.mkstemp(dir=STATE_DIR)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(trimmed) + ("\n" if trimmed else ""))
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, HISTORY_PATH)
+
+
+def generate_one(words: list[str], min_length: int, add_number: bool, symbol: str | None, capitalize: bool) -> str:
+    remaining = list(words)
+    parts = []
+    length = 0
+    while length < min_length:
+        if not remaining:
+            remaining = list(words)  # only reachable if min_length is large enough to exhaust all 1,296 words
+        w = secrets.choice(remaining)
+        remaining.remove(w)
+        w = w.capitalize() if capitalize else w.lower()
+        parts.append(w)
+        length += len(w)
+    if add_number:
+        digit = secrets.choice("0123456789")
+        if len(parts) > 1:
+            # insert strictly between two words, never before the first or after
+            # the last -- those are edge positions, not "between words"
+            idx = secrets.randbelow(len(parts) - 1) + 1
+            parts.insert(idx, digit)
+        else:
+            parts.append(digit)  # only one word drawn: no "between" position exists
+    password = "".join(parts)
+    if symbol:
+        password += symbol
+    return password
+
+
+def generate_unique(words, min_length, add_number, symbol, capitalize, seen: set) -> str:
+    for _ in range(MAX_ATTEMPTS):
+        candidate = generate_one(words, min_length, add_number, symbol, capitalize)
+        if candidate not in seen:
+            return candidate
+    sys.exit(
+        f"error: could not generate a new password after {MAX_ATTEMPTS} attempts.\n"
+        "Lower WORDPASS_HISTORY_SIZE or raise --min-length."
+    )
+
+
+def copy_to_clipboard(text: str) -> None:
+    try:
+        subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        print(f"warning: could not copy to clipboard ({e})", file=sys.stderr)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="wordpass", description="Generate memorable passwords.")
+    parser.add_argument("-c", "--count", type=int, default=1, help="number of passwords to generate")
+    parser.add_argument("-l", "--min-length", type=int, default=14, help="minimum password length")
+    parser.add_argument(
+        "-n", "--number",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="insert a random digit between words (default: on; use --no-number to disable)",
+    )
+    parser.add_argument(
+        "-s", "--symbol",
+        nargs="?", const=DEFAULT_SYMBOL, default=DEFAULT_SYMBOL, metavar="CHAR",
+        help=f"append CHAR at the end (default: '{DEFAULT_SYMBOL}'; use --no-symbol to disable)",
+    )
+    parser.add_argument(
+        "--no-symbol",
+        action="store_const", dest="symbol", const=None,
+        help="don't append a symbol",
+    )
+    parser.add_argument("--capitalize", action="store_true", help="capitalize each word (default: lowercase)")
+    parser.add_argument("--no-clipboard", action="store_true", help="don't copy to clipboard")
+    args = parser.parse_args()
+
+    if args.count < 1:
+        parser.error("--count must be >= 1")
+    if args.min_length < 1:
+        parser.error("--min-length must be >= 1")
+    if args.symbol is not None and (len(args.symbol) != 1 or not args.symbol.isprintable() or args.symbol.isspace()):
+        parser.error("--symbol must be a single printable, non-whitespace character")
+
+    history_size = parse_history_size()
+    words = ensure_wordlist()
+    seen = set(load_history())
+
+    generated = []
+    try:
+        for _ in range(args.count):
+            pw = generate_unique(words, args.min_length, args.number, args.symbol, args.capitalize, seen)
+            seen.add(pw)
+            generated.append(pw)
+            append_history(pw)
+            print(pw)
+    finally:
+        # Always trim, even on the exhaustion sys.exit() above (SystemExit still
+        # runs a finally) -- otherwise a failed run leaves history permanently
+        # over WORDPASS_HISTORY_SIZE until some later successful run trims it.
+        trim_history(history_size)
+
+    skip_clipboard = args.no_clipboard or len(generated) > 1 or not sys.stdout.isatty()
+    if skip_clipboard:
+        if len(generated) > 1 and not args.no_clipboard:
+            print("(clipboard skipped: multiple passwords generated)", file=sys.stderr)
+    else:
+        copy_to_clipboard(generated[0])
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BrokenPipeError:
+        # e.g. `wordpass -c 50 | head -1` -- suppress the traceback noise from
+        # writing to a closed pipe; redirect stdout to /dev/null first so Python's
+        # own shutdown flush doesn't raise the same error a second time.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(1)
