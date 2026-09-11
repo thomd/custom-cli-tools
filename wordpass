@@ -1,29 +1,113 @@
 #!/usr/bin/env python3
-"""wordpass: generate memorable passwords from the EFF short wordlist (2.0)."""
+"""wordpass: generate memorable passwords from adjective-noun pairs you can picture."""
 import argparse
-import http.client
 import os
 import secrets
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 
-WORDLIST_URL = "https://www.eff.org/files/2016/09/08/eff_short_wordlist_2_0.txt"
-DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "wordpass"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "wordpass"
-WORDLIST_PATH = (
-    Path(os.environ["WORDPASS_WORDLIST"])
-    if os.environ.get("WORDPASS_WORDLIST")
-    else DATA_DIR / "eff_short_wordlist_2_0.txt"
-)
+NOUNS_PATH = Path(os.environ["WORDPASS_NOUNS"]) if os.environ.get("WORDPASS_NOUNS") else None
+ADJECTIVES_PATH = Path(os.environ["WORDPASS_ADJECTIVES"]) if os.environ.get("WORDPASS_ADJECTIVES") else None
 HISTORY_PATH = STATE_DIR / "history.txt"
-DEFAULT_SYMBOL = "#"
-MIN_EXPECTED_WORDS = 1000  # sanity floor; real list has 1,296 entries
+DEFAULT_SEPARATOR = "-"
 MAX_ATTEMPTS = 100
-DOWNLOAD_TIMEOUT = 15
+
+# Curated list of concrete, everyday nouns -- animals, food, household objects,
+# body parts, nature, vehicles -- chosen to be easy to picture in the mind's eye,
+# unlike a general wordlist (e.g. EFF's), which mixes in abstract words like
+# "otherwise" or "affidavit" that are hard to visualize and so harder to remember.
+BUILTIN_NOUNS = """
+accordion acorn airplane almond anchor anemone ankle ant apple arm
+arrow ash asteroid astronaut avalanche avocado axe back backpack bacon
+badger bag bagel ball balloon banana banjo banner barn barrel
+baseball basket basketball bat bathtub battery beach bean bear beard
+beaver bed bee beetle bell belt bicycle bin binoculars biscuit
+blanket blimp blueberry bluejay boat bolt book boot boulder bow
+bowl box brain branch bread brick bridge broccoli broom brush
+bucket buggy buoy burger bus bush butter butterfly button cabbage
+cabin cabinet cable cactus cake calf camel camera campfire candle
+canoe canyon car caravan cardinal carpet carriage carrot cashew castle
+cat caterpillar cave celery cello chain chair chandelier chapel chariot
+cheek cheese cherry chest chick chicken chimney chin church clam
+clarinet cliff clock cloud coat coconut cocoon coffee coin comb
+comet compass confetti cookie coral corn cottage couch cow crab
+crate crayon cricket croissant crow crown cub cucumber cup curtain
+daisy date deer desert desk diamond dice dog doll dolphin
+donkey donut door doorknob drawer dress drill drum drumstick duck
+dune eagle ear earlobe earphone egg elbow elephant engine envelope
+eye eyebrow eyelash eyelid faucet fawn fence fern ferry fig
+finger fire firefly fireplace fish fist flag flame flamingo flashlight
+flea flower flute foal fog foot football forest fork fox
+frog garage garlic gate gear gem geyser gift giraffe glacier
+globe glove goat gold gondola goose gorilla grape grass grasshopper
+greenhouse guitar hair hammer hand harp hat hawk haystack head
+headphone heart hedgehog helicopter helmet heron hill hip hockey honey
+hornet horse hose house hummingbird hut ice iceberg icicle igloo
+island jacket jar jaw jellyfish jersey jet jewel juice kangaroo
+kayak kettle key kite kitten kiwi knee kneecap knife koala
+ladder ladybug lagoon lake lamb lamp lantern leaf lemon letter
+lettuce lightbulb lighter lighthouse lightning lime lion lip lizard lobster
+lock lung magnet mango mansion map maraca marker marsh mast
+matchstick mattress meadow medal melon meteor microphone milk mirror monkey
+moon moose mop mosquito moss moth motorcycle mountain mouse mouth
+muffin mug mushroom mustache nail neck necktie needle net noodle
+nose nostril nut oasis ocean octopus olive onion orange ostrich
+otter oven owl oyster page pail paint palace palm pan
+pancake panda parrot pea peach peacock peanut pear pearl pebble
+pelican pen pencil penguin pepper periscope petal phone piano pickle
+pie pig piglet pillow pineapple pinecone pipe piston pitchfork pizza
+planet plate plow plum popcorn porthole pot potato present pretzel
+pumpkin puppy purse puzzle rabbit raccoon racket radish raft rain
+rainbow raisin rake raspberry raven razor reef rib ribbon ribcage
+rice ring river robin robot rock rocket roof rooster root
+rope rose rug sail salad salt sand sandwich satellite sausage
+saw saxophone scalp scarecrow scarf scissors scooter scorpion screen screw
+screwdriver sea seahorse seal seashell shark shed sheep shelf shield
+ship shirt shoe shoulder shovel shrimp silo sink skateboard skeleton
+skirt skis skull skunk sky sled smoke snail snake snow
+snowflake snowman soap sock sofa soup spaceship sparrow speaker spider
+spinach spine sponge spoon sprinkler squirrel stamp star starfish steak
+sticker stone stork storm stove strawberry streamer submarine sugar suitcase
+sun sunflower surfboard swamp swan sword table taco tadpole tambourine
+tea telescope tennis tent thread thumb thunder tick ticket tiger
+tile toe tomato tongue toolbox tooth toothbrush torch toucan towel
+tower tractor train trampoline treasure tree trolley trophy truck trumpet
+trunk tulip turkey turtle umbrella urchin valley vase vertebra vine
+violin volcano vulture waffle wagon wallet walnut walrus washer wasp
+watch waterfall watermelon wave whale wheel wheelbarrow whistle wick wind
+windmill window wine wire wolf woodpecker worm wrench wrist xylophone
+zebra zipper
+""".split()
+
+# Curated list of vivid, visual adjectives -- colors, textures, sizes, weather,
+# temperament (via visible expression/body language) -- paired with a noun to
+# form a single concrete mental image (e.g. "purple elephant"), which is easier
+# to remember than an unrelated string of nouns.
+BUILTIN_ADJECTIVES = """
+amber ancient angry battered bearded bent bitter black blue bold
+bouncing braided brave bright broken bronze bulky bumpy burning burnt
+chalky checkered cheerful chewy chipped chunky clawed clever cloudy clumsy
+colossal copper cracked crawling creamy crimson crispy crooked crunchy curious
+curved dark dazzling dented dim dimpled dotted drifting dusty emerald
+empty fearless feathery fierce flat floating fluffy flying foggy folded
+freckled fresh frosty frozen furry fuzzy galloping gentle giant gigantic
+gleaming glittering glossy glowing golden graceful greasy green grilled grumpy
+happy hazy heavy hollow horned huge icy indigo ivory jolly
+jumping knotted lanky lazy leathery light loud marble maroon massive
+melted microscopic mighty miniature misty muddy murky narrow new nimble
+oily old orange pale patched patterned petite pink playful plump
+polished proud purple rainy red roasted rolled rough round rusted
+rusty salty sandy scaly scarlet shimmering shiny short shy silent
+silky silver sinking skinny sleepy slender sliding slippery slow small
+smooth sneaky snowy soggy solid sour sparkling speckled spicy spinning
+spotted square stale starry sticky stormy stout striped stubby sturdy
+sunny sweet swift tall tangled tasty thick thin timid tiny
+toasted torn towering turquoise twisted velvety violet vivid waxy whiskered
+white wide wild windy winged wobbly wooden woven yellow young
+""".split()
 
 
 def parse_history_size() -> int:
@@ -43,66 +127,36 @@ def parse_words(raw: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        # canonical EFF format is "<diceroll><whitespace><word>"; tolerate plain
-        # word-per-line too. split() (not split("\t")) so this survives whichever
-        # whitespace the real download turns out to use.
         words.append(line.split()[-1])
     return words
 
 
 def _looks_like_a_word(w: str) -> bool:
-    # EFF's short wordlist 2.0 contains at least one hyphenated entry ("yo-yo"),
-    # confirmed by testing against a real copy of the list -- plain isalpha() would
-    # reject it and make the tool fail on its own official wordlist.
     return w.isascii() and bool(w) and all(c.isalpha() or c == "-" for c in w) and w[0] != "-" and w[-1] != "-"
 
 
-def wordlist_looks_valid(words: list[str]) -> bool:
-    return len(words) >= MIN_EXPECTED_WORDS and all(_looks_like_a_word(w) for w in words)
-
-
-def download_wordlist() -> str:
-    try:
-        with urllib.request.urlopen(WORDLIST_URL, timeout=DOWNLOAD_TIMEOUT) as resp:
-            return resp.read().decode("utf-8-sig")
-    # OSError (not TimeoutError) so this also catches socket.timeout, which is only
-    # an alias of TimeoutError from Python 3.10 -- macOS system python3 is 3.9.6.
-    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
-        sys.exit(
-            f"error: could not download wordlist from {WORDLIST_URL}: {e}\n"
-            f"Fix manually and place a word-per-line file at: {WORDLIST_PATH}"
-        )
-
-
-def ensure_wordlist() -> list[str]:
-    # WORDPASS_WORDLIST is authoritative when set: never downloaded, never
-    # validated against the 1,296-word floor, never overwritten. A small fixture
-    # file used for testing must survive untouched.
-    if os.environ.get("WORDPASS_WORDLIST"):
-        if not WORDLIST_PATH.exists():
-            sys.exit(f"error: WORDPASS_WORDLIST={WORDLIST_PATH} does not exist")
-        words = parse_words(WORDLIST_PATH.read_text(encoding="utf-8-sig"))
-        if not words or not all(_looks_like_a_word(w) for w in words):
-            sys.exit(f"error: wordlist at {WORDLIST_PATH} contains no usable words")
-        return words
-
-    if WORDLIST_PATH.exists():
-        words = parse_words(WORDLIST_PATH.read_text(encoding="utf-8-sig"))
-        if wordlist_looks_valid(words):
-            return words
-        print(f"warning: cached wordlist at {WORDLIST_PATH} looks corrupt, re-downloading", file=sys.stderr)
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw = download_wordlist()
-    words = parse_words(raw)
-    if not wordlist_looks_valid(words):
-        sys.exit(f"error: downloaded wordlist from {WORDLIST_URL} looks invalid (got {len(words)} entries)")
-
-    fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(raw)
-    os.replace(tmp_path, WORDLIST_PATH)
+def _load_words(path: Path, env_var: str) -> list[str]:
+    if not path.exists():
+        sys.exit(f"error: {env_var}={path} does not exist")
+    words = parse_words(path.read_text(encoding="utf-8-sig"))
+    if not words or not all(_looks_like_a_word(w) for w in words):
+        sys.exit(f"error: wordlist at {path} contains no usable words")
     return words
+
+
+def ensure_nouns() -> list[str]:
+    # WORDPASS_NOUNS overrides the built-in noun list entirely, e.g. for tests or
+    # a custom list. Never modified -- a small fixture file used for testing must
+    # survive untouched.
+    if NOUNS_PATH is not None:
+        return _load_words(NOUNS_PATH, "WORDPASS_NOUNS")
+    return list(BUILTIN_NOUNS)
+
+
+def ensure_adjectives() -> list[str]:
+    if ADJECTIVES_PATH is not None:
+        return _load_words(ADJECTIVES_PATH, "WORDPASS_ADJECTIVES")
+    return list(BUILTIN_ADJECTIVES)
 
 
 def load_history() -> list[str]:
@@ -134,41 +188,45 @@ def trim_history(max_size: int) -> None:
     os.replace(tmp_path, HISTORY_PATH)
 
 
-def generate_one(words: list[str], min_length: int, add_number: bool, symbol: str | None, capitalize: bool) -> str:
-    remaining = list(words)
-    parts = []
-    length = 0
-    while length < min_length:
-        if not remaining:
-            remaining = list(words)  # only reachable if min_length is large enough to exhaust all 1,296 words
-        w = secrets.choice(remaining)
-        remaining.remove(w)
-        w = w.capitalize() if capitalize else w.lower()
-        parts.append(w)
-        length += len(w)
-    if add_number:
-        digit = secrets.choice("0123456789")
-        if len(parts) > 1:
-            # insert strictly between two words, never before the first or after
-            # the last -- those are edge positions, not "between words"
-            idx = secrets.randbelow(len(parts) - 1) + 1
-            parts.insert(idx, digit)
-        else:
-            parts.append(digit)  # only one word drawn: no "between" position exists
-    password = "".join(parts)
-    if symbol:
-        password += symbol
+def _format(adj_words: list[str], noun: str, digits: str, separator: str, capitalize: bool) -> str:
+    def word(w: str) -> str:
+        return w.capitalize() if capitalize else w.lower()
+
+    return separator.join([word(a) for a in adj_words] + [word(noun), digits])
+
+
+def generate_one(adjectives: list[str], nouns: list[str], separator: str, capitalize: bool, length: int) -> str:
+    # Base pattern: {adjective}{separator}{noun}{separator}{number}
+    adj1 = secrets.choice(adjectives)
+    noun = secrets.choice(nouns)
+    digits = secrets.choice("0123456789")
+    password = _format([adj1], noun, digits, separator, capitalize)
+    if len(password) >= length:
+        return password
+
+    # Too short: escalate to {adjective}{separator}{adjective}{separator}{noun}{separator}{number}
+    # -- a second, distinct adjective adds length via another visualizable word,
+    # which serves the "memorable" goal better than just padding the number.
+    remaining_adj = [a for a in adjectives if a != adj1] or adjectives
+    adj2 = secrets.choice(remaining_adj)
+    password = _format([adj2, adj1], noun, digits, separator, capitalize)
+
+    # Last resort, only reachable with a very large --length: keep appending
+    # successor digits to the number segment until long enough.
+    while len(password) < length:
+        digits += secrets.choice("0123456789")
+        password = _format([adj2, adj1], noun, digits, separator, capitalize)
     return password
 
 
-def generate_unique(words, min_length, add_number, symbol, capitalize, seen: set) -> str:
+def generate_unique(adjectives, nouns, separator, capitalize, length, seen: set) -> str:
     for _ in range(MAX_ATTEMPTS):
-        candidate = generate_one(words, min_length, add_number, symbol, capitalize)
+        candidate = generate_one(adjectives, nouns, separator, capitalize, length)
         if candidate not in seen:
             return candidate
     sys.exit(
         f"error: could not generate a new password after {MAX_ATTEMPTS} attempts.\n"
-        "Lower WORDPASS_HISTORY_SIZE or raise --min-length."
+        "Lower WORDPASS_HISTORY_SIZE, or add more words via WORDPASS_NOUNS/WORDPASS_ADJECTIVES."
     )
 
 
@@ -180,43 +238,36 @@ def copy_to_clipboard(text: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="wordpass", description="Generate memorable passwords.")
-    parser.add_argument("-c", "--count", type=int, default=1, help="number of passwords to generate")
-    parser.add_argument("-l", "--min-length", type=int, default=14, help="minimum password length")
-    parser.add_argument(
-        "-n", "--number",
-        action=argparse.BooleanOptionalAction, default=True,
-        help="insert a random digit between words (default: on; use --no-number to disable)",
+    parser = argparse.ArgumentParser(
+        prog="wordpass", description="Generate memorable {adjective}{sep}{noun}{sep}{number} passwords."
     )
+    parser.add_argument("-c", "--count", type=int, default=1, help="number of passwords to generate")
+    parser.add_argument("-l", "--length", type=int, default=14, help="minimum total password length")
     parser.add_argument(
         "-s", "--symbol",
-        nargs="?", const=DEFAULT_SYMBOL, default=DEFAULT_SYMBOL, metavar="CHAR",
-        help=f"append CHAR at the end (default: '{DEFAULT_SYMBOL}'; use --no-symbol to disable)",
+        default=DEFAULT_SEPARATOR, metavar="CHAR",
+        help=f"separator between adjective, noun, and number (default: '{DEFAULT_SEPARATOR}')",
     )
-    parser.add_argument(
-        "--no-symbol",
-        action="store_const", dest="symbol", const=None,
-        help="don't append a symbol",
-    )
-    parser.add_argument("--capitalize", action="store_true", help="capitalize each word (default: lowercase)")
+    parser.add_argument("--capitalize", action="store_true", help="capitalize the adjective and noun (default: lowercase)")
     parser.add_argument("--no-clipboard", action="store_true", help="don't copy to clipboard")
     args = parser.parse_args()
 
     if args.count < 1:
         parser.error("--count must be >= 1")
-    if args.min_length < 1:
-        parser.error("--min-length must be >= 1")
-    if args.symbol is not None and (len(args.symbol) != 1 or not args.symbol.isprintable() or args.symbol.isspace()):
+    if args.length < 1:
+        parser.error("--length must be >= 1")
+    if len(args.symbol) != 1 or not args.symbol.isprintable() or args.symbol.isspace():
         parser.error("--symbol must be a single printable, non-whitespace character")
 
     history_size = parse_history_size()
-    words = ensure_wordlist()
+    adjectives = ensure_adjectives()
+    nouns = ensure_nouns()
     seen = set(load_history())
 
     generated = []
     try:
         for _ in range(args.count):
-            pw = generate_unique(words, args.min_length, args.number, args.symbol, args.capitalize, seen)
+            pw = generate_unique(adjectives, nouns, args.symbol, args.capitalize, args.length, seen)
             seen.add(pw)
             generated.append(pw)
             append_history(pw)
