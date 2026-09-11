@@ -20,3 +20,13 @@ wordpass [-c COUNT] [-l LENGTH] [-s CHAR] [--capitalize] [--no-clipboard]
 Env vars: `WORDPASS_HISTORY_SIZE` (default 40, max passwords remembered for dedup), `WORDPASS_NOUNS` / `WORDPASS_ADJECTIVES` (override the built-in word lists with a custom file path).
 
 Install: `make install` (puts it in `$HOME/.local/bin`).
+
+## Completions
+
+`bash_completion.d/` carries completion scripts for third-party CLIs that don't ship their own:
+
+| Completion | Description                                                                          |
+| ---------- | ------------------------------------------------------------------------------------- |
+| `code`     | Completes `code` (VS Code CLI) options from `code --help` and `--profile` names from `~/Library/Application Support/Code/User/globalStorage/storage.json` (macOS) |
+
+Installed by `make install` into `$HOME/etc/bash_completion.d`.
