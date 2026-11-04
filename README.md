@@ -3,7 +3,7 @@
 ## wordpass
 
 > **Note**  
-> This CLI tool was built entirely using [Claude Code](https://github.com/anthropics/claude-code) by Anthropic.
+> These CLI tools were built entirely using an Coding Agent.
 
 Generates memorable passwords in the pattern `adjective-noun-number` (escalating to `adjective-adjective-noun-number` if needed to meet the minimum length), built from a curated list of concrete, easy-to-visualize words (e.g. `purple-tiger-7`) — no network access needed, copies to clipboard, and never repeats a password.
 
