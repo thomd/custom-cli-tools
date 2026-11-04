@@ -1,0 +1,18 @@
+_WORDPASS_OPTIONS="--count -c --length -l --symbol -s --capitalize --no-clipboard --purge-history --help -h"
+
+_wordpass_completions() {
+  local cur prev
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  case "$prev" in
+    -c|--count|-l|--length|-s|--symbol)
+      return 0
+      ;;
+  esac
+
+  COMPREPLY=($(compgen -W "$_WORDPASS_OPTIONS" -- "$cur"))
+}
+
+complete -F _wordpass_completions wordpass

@@ -188,11 +188,29 @@ def trim_history(max_size: int) -> None:
     os.replace(tmp_path, HISTORY_PATH)
 
 
+def purge_history() -> None:
+    try:
+        HISTORY_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _format(adj_words: list[str], noun: str, digits: str, separator: str, capitalize: bool) -> str:
     def word(w: str) -> str:
         return w.capitalize() if capitalize else w.lower()
 
     return separator.join([word(a) for a in adj_words] + [word(noun), digits])
+
+
+def has_simple_character_pattern(password: str) -> bool:
+    if any(left == right for left, right in zip(password, password[1:])):
+        return True
+
+    return any(
+        (ord(middle) - ord(first) == step) and (ord(last) - ord(middle) == step)
+        for first, middle, last in zip(password, password[1:], password[2:])
+        for step in (1, -1)
+    )
 
 
 def generate_one(adjectives: list[str], nouns: list[str], separator: str, capitalize: bool, length: int) -> str:
@@ -222,11 +240,12 @@ def generate_one(adjectives: list[str], nouns: list[str], separator: str, capita
 def generate_unique(adjectives, nouns, separator, capitalize, length, seen: set) -> str:
     for _ in range(MAX_ATTEMPTS):
         candidate = generate_one(adjectives, nouns, separator, capitalize, length)
-        if candidate not in seen:
+        if candidate not in seen and not has_simple_character_pattern(candidate):
             return candidate
     sys.exit(
-        f"error: could not generate a new password after {MAX_ATTEMPTS} attempts.\n"
-        "Lower WORDPASS_HISTORY_SIZE, or add more words via WORDPASS_NOUNS/WORDPASS_ADJECTIVES."
+        f"error: could not generate a new policy-compliant password after {MAX_ATTEMPTS} attempts.\n"
+        "Lower WORDPASS_HISTORY_SIZE, choose another separator, or add more words via "
+        "WORDPASS_NOUNS/WORDPASS_ADJECTIVES."
     )
 
 
@@ -239,7 +258,9 @@ def copy_to_clipboard(text: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="wordpass", description="Generate memorable {adjective}{sep}{noun}{sep}{number} passwords."
+        prog="wordpass",
+        description="Generate memorable {adjective}{sep}{noun}{sep}{number} passwords.",
+        epilog=f"Generated-password history: {HISTORY_PATH}",
     )
     parser.add_argument("-c", "--count", type=int, default=1, help="number of passwords to generate")
     parser.add_argument("-l", "--length", type=int, default=14, help="minimum total password length")
@@ -250,7 +271,13 @@ def main() -> None:
     )
     parser.add_argument("--capitalize", action="store_true", help="capitalize the adjective and noun (default: lowercase)")
     parser.add_argument("--no-clipboard", action="store_true", help="don't copy to clipboard")
+    parser.add_argument("--purge-history", action="store_true", help="delete all saved passwords from history and exit")
     args = parser.parse_args()
+
+    if args.purge_history:
+        purge_history()
+        print(f"Password history purged: {HISTORY_PATH}")
+        return
 
     if args.count < 1:
         parser.error("--count must be >= 1")
